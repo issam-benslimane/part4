@@ -8,14 +8,24 @@ const helper = require("./test_helper");
 const dummyUser = { username: "root", password: "test" };
 
 beforeEach(async () => {
-  await Blog.deleteMany({});
-  await User.deleteMany({});
-  const userResponse = await api.post("/api/users").send(dummyUser);
+  await api.post("/api/users").send(dummyUser);
+  const {
+    body: { token },
+  } = await api.post("/api/login").send(dummyUser);
+  console.log(token);
   await Promise.all(
     helper.initialBlogs.map((blog) =>
-      new Blog({ ...blog, user: userResponse.body.id }).save()
+      api
+        .post("/api/blogs")
+        .send(blog)
+        .set({ Authorization: `bearer ${token}` })
     )
   );
+});
+
+afterEach(async () => {
+  await Blog.deleteMany({});
+  await User.deleteMany({});
 });
 
 describe("when there is initially some blogs saved", () => {
@@ -74,7 +84,7 @@ describe("addition of a blog", () => {
       likes: 10,
     };
     const loginResponse = await api.post("/api/login").send(dummyUser);
-    await api
+    const postResponse = await api
       .post(`/api/blogs`)
       .set({ Authorization: `bearer ${loginResponse.body.token}` })
       .send(newBlog)
@@ -86,6 +96,9 @@ describe("addition of a blog", () => {
 
     const titles = blogsAtEnd.map((r) => r.title);
     expect(titles).toContain("First class tests");
+
+    const user = await User.findOne({ blogs: postResponse.body.id });
+    expect(user).not.toEqual(null);
   });
   test("blog fails to be added if authorization header is note sent", async () => {
     const newBlog = {};
@@ -149,6 +162,7 @@ describe("deletion of a blog", () => {
   test("succeeds if user is the one who added it", async () => {
     const blogsAtStart = await helper.blogsInDB();
     const blogToDelete = blogsAtStart[0];
+    const userAtStart = await User.findById(blogToDelete.user);
     const loginResponse = await api.post("/api/login").send(dummyUser);
     await api
       .delete(`/api/blogs/${blogToDelete.id}`)
@@ -156,12 +170,14 @@ describe("deletion of a blog", () => {
       .expect(204);
 
     const blogsAtEnd = await helper.blogsInDB();
+    const userAtEnd = await User.findById(blogToDelete.user);
+    expect(userAtEnd.blogs).toHaveLength(userAtStart.blogs.length - 1);
     expect(blogsAtEnd).toHaveLength(helper.initialBlogs.length - 1);
     expect(
       blogsAtEnd.find((blog) => blog.url === blogToDelete.url)
     ).not.toBeDefined();
   });
-  test("fails if user is not the one who added it", async () => {
+  test("fails if not", async () => {
     const blogsAtStart = await helper.blogsInDB();
     const blogToDelete = blogsAtStart[0];
     await api
@@ -175,7 +191,7 @@ describe("deletion of a blog", () => {
 });
 
 describe("update a blog", () => {
-  test("update blog", async () => {
+  test("succeeds if user is the one who added it", async () => {
     const dummyBlog = {
       title: "second class tests",
       author: "Robert C. Martin",
@@ -183,8 +199,10 @@ describe("update a blog", () => {
     };
     const blogsAtStart = await helper.blogsInDB();
     const blogToUpdate = blogsAtStart[0];
+    const loginResponse = await api.post("/api/login").send(dummyUser);
     await api
       .put(`/api/blogs/${blogToUpdate.id}`)
+      .set({ Authorization: `bearer ${loginResponse.body.token}` })
       .send(dummyBlog)
       .expect(200)
       .expect("Content-Type", /application\/json/);
@@ -194,6 +212,16 @@ describe("update a blog", () => {
     expect(urls).toHaveLength(helper.initialBlogs.length);
     expect(urls).toContain(dummyBlog.url);
     expect(urls).not.toContain(blogToUpdate.url);
+  });
+
+  test("fails if not", async () => {
+    const blogsAtStart = await helper.blogsInDB();
+    const blogToUpdate = blogsAtStart[0];
+    await api
+      .put(`/api/blogs/${blogToUpdate.id}`)
+      .send({})
+      .set({ Authorization: `bearer invalidtoken` })
+      .expect(401);
   });
 });
 
