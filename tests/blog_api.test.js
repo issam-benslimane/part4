@@ -3,11 +3,19 @@ const app = require("../app");
 const supertest = require("supertest");
 const api = supertest(app);
 const Blog = require("../models/blog");
+const User = require("../models/user");
 const helper = require("./test_helper");
+const dummyUser = { username: "root", password: "test" };
 
 beforeEach(async () => {
   await Blog.deleteMany({});
-  await Promise.all(helper.initialBlogs.map((blog) => new Blog(blog).save()));
+  await User.deleteMany({});
+  const userResponse = await api.post("/api/users").send(dummyUser);
+  await Promise.all(
+    helper.initialBlogs.map((blog) =>
+      new Blog({ ...blog, user: userResponse.body.id }).save()
+    )
+  );
 });
 
 describe("when there is initially some blogs saved", () => {
@@ -38,7 +46,7 @@ describe("when there is initially some blogs saved", () => {
 describe("viewing a specific blog", () => {
   test("succeeds with a valid id", async () => {
     const blogs = await helper.blogsInDB();
-    const blogToView = blogs[0];
+    const blogToView = JSON.parse(JSON.stringify(blogs[0]));
     const response = await api
       .get(`/api/blogs/${blogToView.id}`)
       .expect(200)
@@ -57,16 +65,18 @@ describe("viewing a specific blog", () => {
   });
 });
 
-describe("addition of a note", () => {
-  test("a valid blog can be added", async () => {
+describe("addition of a blog", () => {
+  test("a valid blog can be added if authorization header is sent from client", async () => {
     const newBlog = {
       title: "First class tests",
       author: "Robert C. Martin",
       url: "http://blog.cleancoder.com/uncle-bob/2017/05/05/TestDefinitions.htmll",
       likes: 10,
     };
+    const loginResponse = await api.post("/api/login").send(dummyUser);
     await api
-      .post("/api/blogs")
+      .post(`/api/blogs`)
+      .set({ Authorization: `bearer ${loginResponse.body.token}` })
       .send(newBlog)
       .expect(201)
       .expect("content-type", /application\/json/);
@@ -77,13 +87,40 @@ describe("addition of a note", () => {
     const titles = blogsAtEnd.map((r) => r.title);
     expect(titles).toContain("First class tests");
   });
+  test("blog fails to be added if authorization header is note sent", async () => {
+    const newBlog = {};
+    await api
+      .post("/api/blogs")
+      .send(newBlog)
+      .expect(401)
+      .expect("content-type", /application\/json/);
+
+    const blogsAtEnd = await helper.blogsInDB();
+    expect(blogsAtEnd).toHaveLength(helper.initialBlogs.length);
+  });
+  test("blog fails to be added if sent token is not valid", async () => {
+    const newBlog = {};
+    await api
+      .post("/api/blogs")
+      .set({ Authorization: "bearer " })
+      .send(newBlog)
+      .expect(401)
+      .expect("content-type", /application\/json/);
+
+    const blogsAtEnd = await helper.blogsInDB();
+    expect(blogsAtEnd).toHaveLength(helper.initialBlogs.length);
+  });
   test("likes property defaults to 0 if not specified", async () => {
     const newBlog = {
       title: "second class tests",
       author: "Robert C. Martin",
       url: "http://blog.medium.com/uncle-bob/2018/05/05/TestDefinitions.html",
     };
-    await api.post("/api/blogs").send(newBlog);
+    const loginResponse = await api.post("/api/login").send(dummyUser);
+    await api
+      .post("/api/blogs")
+      .set({ Authorization: `bearer ${loginResponse.body.token}` })
+      .send(newBlog);
 
     const blogsAtEnd = await helper.blogsInDB();
     const blogAdded = blogsAtEnd.find((blog) => blog.url === newBlog.url);
@@ -91,8 +128,17 @@ describe("addition of a note", () => {
     expect(blogAdded.likes).toBe(0);
   });
   test("blog without title or url is not added", async () => {
-    await api.post("/api/blogs").send({ title: "", url: "url" }).expect(400);
-    await api.post("/api/blogs").send({ title: "title", url: "" }).expect(400);
+    const loginResponse = await api.post("/api/login").send(dummyUser);
+    await api
+      .post("/api/blogs")
+      .set({ Authorization: `bearer ${loginResponse.body.token}` })
+      .send({ title: "", url: "url" })
+      .expect(400);
+    await api
+      .post("/api/blogs")
+      .set({ Authorization: `bearer ${loginResponse.body.token}` })
+      .send({ title: "title", url: "" })
+      .expect(400);
 
     const blogsAtEnd = await helper.blogsInDB();
     expect(blogsAtEnd).toHaveLength(helper.initialBlogs.length);
@@ -100,16 +146,31 @@ describe("addition of a note", () => {
 });
 
 describe("deletion of a blog", () => {
-  test("succeeds if id is valid", async () => {
+  test("succeeds if user is the one who added it", async () => {
     const blogsAtStart = await helper.blogsInDB();
     const blogToDelete = blogsAtStart[0];
-    await api.delete(`/api/blogs/${blogToDelete.id}`).expect(204);
+    const loginResponse = await api.post("/api/login").send(dummyUser);
+    await api
+      .delete(`/api/blogs/${blogToDelete.id}`)
+      .set({ Authorization: `bearer ${loginResponse.body.token}` })
+      .expect(204);
 
     const blogsAtEnd = await helper.blogsInDB();
     expect(blogsAtEnd).toHaveLength(helper.initialBlogs.length - 1);
     expect(
       blogsAtEnd.find((blog) => blog.url === blogToDelete.url)
     ).not.toBeDefined();
+  });
+  test("fails if user is not the one who added it", async () => {
+    const blogsAtStart = await helper.blogsInDB();
+    const blogToDelete = blogsAtStart[0];
+    await api
+      .delete(`/api/blogs/${blogToDelete.id}`)
+      .set({ Authorization: `bearer invalidtoken` })
+      .expect(401);
+
+    const blogsAtEnd = await helper.blogsInDB();
+    expect(blogsAtEnd).toHaveLength(helper.initialBlogs.length);
   });
 });
 
